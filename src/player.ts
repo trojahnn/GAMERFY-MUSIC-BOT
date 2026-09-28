@@ -6,6 +6,10 @@ import type { Resolver, Track } from './resolver.js';
 export interface Connection {
   play(input: NodeJS.ReadableStream | string): Promise<void>;
   stop(): void;
+  /** Holds the audio where it is, source open; `resume()` carries on from the same packet. */
+  pause(): boolean;
+  resume(): boolean;
+  readonly paused: boolean;
   leave(): Promise<void>;
 }
 
@@ -71,6 +75,8 @@ export interface PlayerSnapshot {
   queue: readonly Track[];
   /** The room being played into, which is who may press the buttons. `null` when idle. */
   voiceChannelId: string | null;
+  /** Held where it is — the card draws play instead of pause. */
+  paused: boolean;
 }
 
 export class GuildPlayer {
@@ -108,6 +114,7 @@ export class GuildPlayer {
       current: this.#current,
       queue: [...this.#queue],
       voiceChannelId: this.#connection === null ? null : this.#lastVoiceChannelId,
+      paused: this.#connection?.paused ?? false,
     });
   }
 
@@ -197,6 +204,32 @@ export class GuildPlayer {
     this.#skipRequested = true; // caught by the loop even if play() has not started yet
     this.#connection?.stop(); // ends the awaited play(); the loop advances
     return where === null ? Promise.resolve() : this.deps.say(where, `Pulei ${label(skipped)}.`);
+  }
+
+  /**
+   * Holds the music where it is. `channelId` is optional for the same reason
+   * as `skip`: a press on the widget names a voice room, not a place to answer.
+   *
+   * Not a stop: the track stays where it is and `resume()` carries on from the
+   * same packet, which is what somebody pressing pause means.
+   */
+  pause(channelId?: string): Promise<void> {
+    if (channelId !== undefined) this.#announceChannelId = channelId;
+    const where = channelId ?? this.#announceChannelId;
+    const held = this.#connection?.pause() ?? false;
+    this.#publish();
+    if (!held) return where === null ? Promise.resolve() : this.deps.say(where, 'Não há nada tocando.');
+    return where === null ? Promise.resolve() : this.deps.say(where, 'Pausei.');
+  }
+
+  /** Lets a paused track go on. */
+  resume(channelId?: string): Promise<void> {
+    if (channelId !== undefined) this.#announceChannelId = channelId;
+    const where = channelId ?? this.#announceChannelId;
+    const went = this.#connection?.resume() ?? false;
+    this.#publish();
+    if (!went) return where === null ? Promise.resolve() : this.deps.say(where, 'Não há nada pausado.');
+    return where === null ? Promise.resolve() : this.deps.say(where, 'Voltei.');
   }
 
   /** `channelId` optional for the same reason as `skip` above. */

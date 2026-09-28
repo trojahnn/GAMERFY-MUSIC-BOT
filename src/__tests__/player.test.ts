@@ -15,6 +15,18 @@ class FakeConnection implements Connection {
       this.#end = (error) => (error ? reject(error) : resolve());
     });
   }
+  /** The pause, as the real connection reports it: held or not, never a restart. */
+  paused = false;
+  pause(): boolean {
+    if (this.playCalls === 0 || this.paused) return false;
+    this.paused = true;
+    return true;
+  }
+  resume(): boolean {
+    if (!this.paused) return false;
+    this.paused = false;
+    return true;
+  }
   endCurrent(error?: Error): void {
     const end = this.#end;
     this.#end = null;
@@ -28,7 +40,7 @@ class FakeConnection implements Connection {
   }
 }
 
-function make(overrides: { voiceChannelId?: string | null; resolve?: Resolver['resolve']; maxQueue?: number; joinError?: Error; roomNames?: Record<string, string> } = {}) {
+function make(overrides: { voiceChannelId?: string | null; resolve?: Resolver['resolve']; maxQueue?: number; joinError?: Error; roomNames?: Record<string, string>; publishWidget?: PlayerDeps['publishWidget'] } = {}) {
   const said: string[] = [];
   const connection = new FakeConnection();
   const resolve: Resolver['resolve'] =
@@ -46,6 +58,7 @@ function make(overrides: { voiceChannelId?: string | null; resolve?: Resolver['r
     // Async on purpose: index.ts reads the cache and then the server (`fetchGuild`).
     voiceChannelOf: vi.fn(async () => (overrides.voiceChannelId === undefined ? 'vc1' : overrides.voiceChannelId)),
     roomNameOf: vi.fn((channelId: string) => overrides.roomNames?.[channelId] ?? null),
+    ...(overrides.publishWidget !== undefined ? { publishWidget: overrides.publishWidget } : {}),
     say: vi.fn(async (_channelId: string, text: string) => {
       said.push(text);
     }),
@@ -72,6 +85,53 @@ describe('GuildPlayer', () => {
    * room nobody can be told anything in, and overwrote the text channel its
    * next announcement was due in.
    */
+  /*
+   * Pause and resume (owner, 28/09). The point of these is that the track is
+   * HELD and not restarted: `playCalls` stays at one across a pause, which is
+   * the difference between pausing and "stop and play again".
+   */
+  it('pause holds the track and resume carries on, without playing it again', async () => {
+    const { player, connection, said } = make();
+    await player.play('numb', ana, 'text-1');
+    // The loop opens the connection a turn later, like every other test here.
+    await vi.waitFor(() => expect(connection.playCalls).toBe(1));
+    said.length = 0;
+
+    await player.pause();
+    expect(connection.paused).toBe(true);
+    expect(has(said, 'Pausei')).toBe(true);
+
+    await player.resume();
+    expect(connection.paused).toBe(false);
+    expect(has(said, 'Voltei')).toBe(true);
+    // The file was never opened a second time.
+    expect(connection.playCalls).toBe(1);
+  });
+
+  it('says so when there is nothing to pause, or nothing paused to resume', async () => {
+    const { player, said } = make();
+
+    await player.pause('text-1');
+    expect(has(said, 'Não há nada tocando.')).toBe(true);
+
+    said.length = 0;
+    await player.resume('text-1');
+    expect(has(said, 'Não há nada pausado.')).toBe(true);
+  });
+
+  it('a paused player publishes a card that is not playing, so the app draws play', async () => {
+    const published: { paused: boolean; current: unknown }[] = [];
+    const { player, connection } = make({ publishWidget: (snapshot) => published.push({ paused: snapshot.paused, current: snapshot.current }) });
+    await player.play('numb', ana, 'text-1');
+    await vi.waitFor(() => expect(connection.playCalls).toBe(1));
+    await player.pause();
+
+    const last = published.at(-1);
+    expect(last?.paused).toBe(true);
+    // Still a track: the card says what is held, it does not go blank.
+    expect(last?.current).not.toBeNull();
+  });
+
   it('a press with no channel answers where the last command came from', async () => {
     const { player, said, deps } = make();
     await player.play('numb', ana, 'text-1');

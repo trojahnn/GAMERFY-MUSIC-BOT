@@ -89,14 +89,18 @@ function publishWidget(guildId: string, snapshot: PlayerSnapshot): void {
     .setWidget(guildId, {
       kind: 'player',
       track: snapshot.current === null ? null : trackOf(snapshot.current),
-      playing: snapshot.current !== null,
+      // `playing` is what the card draws the button from: paused shows play.
+      playing: snapshot.current !== null && !snapshot.paused,
       // Left out on purpose: the position in the track is not tracked, and a
       // bar that always sat at zero would be worse than no bar. The ring in
       // the app simply stays empty.
       progress: null,
       queue: snapshot.queue.slice(0, WIDGET_MAX_QUEUE).map(trackOf),
       queueTotal: snapshot.queue.length,
-      actions: ['skip', 'stop'],
+      // Pause and resume are real now (SDK 0.4): the pacer parks between two
+      // frames with the source open, so coming back carries on from the same
+      // packet instead of restarting the track.
+      actions: ['pause', 'resume', 'skip', 'stop'],
       voiceChannelId: snapshot.voiceChannelId,
     })
     .catch((error: unknown) => {
