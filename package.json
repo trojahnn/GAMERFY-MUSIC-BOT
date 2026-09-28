@@ -18,7 +18,7 @@
     "test": "vitest --run"
   },
   "dependencies": {
-    "@gamerfy/bot": "^0.2.2"
+    "@gamerfy/bot": "^0.3.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",
