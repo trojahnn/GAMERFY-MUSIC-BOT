@@ -1,12 +1,12 @@
 // Wires the Gamerfy bot to the music player: read a `/play …` line, resolve it
 // with yt-dlp, join the asker's room and play; `/skip`, `/stop`, `/queue`, `/np`.
 // Also serves a landing page (and /health) so people can add the bot.
-import { Bot } from '@gamerfy/bot';
+import { Bot, WIDGET_MAX_QUEUE, type WidgetTrack } from '@gamerfy/bot';
 import { parseCommand } from './commands.js';
 import { loadConfig } from './config.js';
-import { GuildPlayer } from './player.js';
+import { formatDuration, GuildPlayer, type PlayerSnapshot } from './player.js';
 import { Players } from './players.js';
-import { FileResolver, YtDlpResolver, type Resolver } from './resolver.js';
+import { FileResolver, YtDlpResolver, type Resolver, type Track } from './resolver.js';
 import { connectWithRetry } from './startup.js';
 import { createWebServer } from './web.js';
 
@@ -51,9 +51,70 @@ const players = new Players(
       join: (channelId) => bot.voice.join(channelId),
       voiceChannelOf: (userId) => voiceChannelOf(guildId, userId),
       roomNameOf: (channelId) => bot.guilds.get(guildId)?.channels.get(channelId)?.name ?? null,
+      publishWidget: (snapshot) => {
+        publishWidget(guildId, snapshot);
+      },
       say,
     }),
 );
+
+/**
+ * The card at the foot of the members column (SDK `setWidget`).
+ *
+ * `pause` is NOT offered, because this bot cannot pause: the voice connection
+ * plays a stream to its end or stops. Offering the button would draw a control
+ * that does nothing — the backend refuses a press for an action the card never
+ * published, so the honest card is the one without it.
+ *
+ * Failures are logged once and swallowed. The widget is decoration over the
+ * music: a backend that refuses it must not end a song, and the next change
+ * publishes again anyway.
+ */
+function publishWidget(guildId: string, snapshot: PlayerSnapshot): void {
+  const trackOf = (track: Track): WidgetTrack => ({
+    title: track.title,
+    subtitle: track.durationSec === null ? null : formatDuration(track.durationSec),
+    requestedBy: track.requestedBy,
+  });
+
+  // Nothing playing and no room: the bot has left, and the card goes with it.
+  if (snapshot.current === null && snapshot.queue.length === 0) {
+    bot.clearWidget(guildId).catch((error: unknown) => {
+      console.error('[music] não consegui tirar o widget', error);
+    });
+    return;
+  }
+
+  bot
+    .setWidget(guildId, {
+      kind: 'player',
+      track: snapshot.current === null ? null : trackOf(snapshot.current),
+      playing: snapshot.current !== null,
+      // Left out on purpose: the position in the track is not tracked, and a
+      // bar that always sat at zero would be worse than no bar. The ring in
+      // the app simply stays empty.
+      progress: null,
+      queue: snapshot.queue.slice(0, WIDGET_MAX_QUEUE).map(trackOf),
+      queueTotal: snapshot.queue.length,
+      actions: ['skip', 'stop'],
+      voiceChannelId: snapshot.voiceChannelId,
+    })
+    .catch((error: unknown) => {
+      console.error('[music] não consegui publicar o widget', error);
+    });
+}
+
+/*
+ * A press on the card. The gateway has already checked that the person was in
+ * the voice room the card named, so there is nothing to check again here —
+ * this is the same command the person could have typed, arriving as a button.
+ */
+bot.on('widgetAction', (event) => {
+  const player = players.of(event.guildId);
+  // No channel: `event.channelId` is the VOICE room, not a place to answer in.
+  if (event.action === 'skip') void player.skip();
+  if (event.action === 'stop') void player.stop();
+});
 
 bot.on('message', async (message) => {
   // `content` is null when the bot may not read the channel and was not

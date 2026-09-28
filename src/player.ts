@@ -22,6 +22,18 @@ export interface PlayerDeps {
   voiceChannelOf(userId: string): Promise<string | null> | string | null;
   /** The name of a voice room of THIS guild, for "ocupado tocando em #sala"; `null` when unknown. */
   roomNameOf?(channelId: string): string | null;
+  /**
+   * The card at the foot of the members column (index.ts hands `bot.setWidget`).
+   *
+   * Called on every change worth showing and never on a timer: what moves
+   * between two of these is the progress bar, and a card republished every
+   * second to move a bar would be a write per second per guild for something
+   * nobody is looking at most of the time.
+   *
+   * Optional, so a player built without it (every test here) simply publishes
+   * nothing.
+   */
+  publishWidget?(snapshot: PlayerSnapshot): void;
   /** Replies in a text channel (the SDK's `messages.send`), never throwing. */
   say(channelId: string, text: string): Promise<void>;
 }
@@ -51,6 +63,16 @@ function reason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** What the widget needs to know, and nothing else — the player's own state, flattened. */
+export interface PlayerSnapshot {
+  /** `null` when nothing is playing: the card then says so instead of vanishing. */
+  current: Track | null;
+  /** The tracks waiting, in order. The card shows the first few and counts the rest. */
+  queue: readonly Track[];
+  /** The room being played into, which is who may press the buttons. `null` when idle. */
+  voiceChannelId: string | null;
+}
+
 export class GuildPlayer {
   readonly #queue: Track[] = [];
   #current: Track | null = null;
@@ -75,6 +97,18 @@ export class GuildPlayer {
 
   #atCapacity(): boolean {
     return this.#queue.length + (this.#current === null ? 0 : 1) >= this.deps.maxQueue;
+  }
+
+  /**
+   * Publishes the card, if anybody is listening. Never throws: the widget is
+   * decoration over the music, and a failure to draw it must not end a song.
+   */
+  #publish(): void {
+    this.deps.publishWidget?.({
+      current: this.#current,
+      queue: [...this.#queue],
+      voiceChannelId: this.#connection === null ? null : this.#lastVoiceChannelId,
+    });
   }
 
   /** The room the running loop joined (or is tearing down from), or `null` when idle. */
@@ -137,6 +171,7 @@ export class GuildPlayer {
     }
 
     this.#queue.push(track);
+    this.#publish();
     if (this.#running) {
       await this.deps.say(channelId, `Na fila (posição ${String(this.#queue.length)}): ${label(track)}`);
       return;
@@ -146,22 +181,33 @@ export class GuildPlayer {
     void this.#run(voiceChannelId);
   }
 
-  skip(channelId: string): Promise<void> {
-    this.#announceChannelId = channelId;
-    if (this.#current === null) return this.deps.say(channelId, 'Não há nada tocando.');
+  /**
+   * `channelId` is where the answer goes, and it is OPTIONAL because a press on
+   * the widget names no text channel — it names a voice room, which is not a
+   * place anybody can be told anything. A press therefore answers where the
+   * last command came from, and answers nowhere at all if there has been no
+   * command: the person pressing a button is already looking at the card, and
+   * the card changing is the answer.
+   */
+  skip(channelId?: string): Promise<void> {
+    if (channelId !== undefined) this.#announceChannelId = channelId;
+    const where = channelId ?? this.#announceChannelId;
+    if (this.#current === null) return where === null ? Promise.resolve() : this.deps.say(where, 'Não há nada tocando.');
     const skipped = this.#current;
     this.#skipRequested = true; // caught by the loop even if play() has not started yet
     this.#connection?.stop(); // ends the awaited play(); the loop advances
-    return this.deps.say(channelId, `Pulei ${label(skipped)}.`);
+    return where === null ? Promise.resolve() : this.deps.say(where, `Pulei ${label(skipped)}.`);
   }
 
-  stop(channelId: string): Promise<void> {
-    this.#announceChannelId = channelId;
-    if (!this.#running) return this.deps.say(channelId, 'Não estou tocando nada.');
+  /** `channelId` optional for the same reason as `skip` above. */
+  stop(channelId?: string): Promise<void> {
+    if (channelId !== undefined) this.#announceChannelId = channelId;
+    const where = channelId ?? this.#announceChannelId;
+    if (!this.#running) return where === null ? Promise.resolve() : this.deps.say(where, 'Não estou tocando nada.');
     this.#stopping = true;
     this.#queue.length = 0;
     this.#connection?.stop(); // ends the current track; the loop sees #stopping and leaves
-    return this.deps.say(channelId, 'Parei e saí da sala.');
+    return where === null ? Promise.resolve() : this.deps.say(where, 'Parei e saí da sala.');
   }
 
   showQueue(channelId: string): Promise<void> {
@@ -206,6 +252,7 @@ export class GuildPlayer {
           continue;
         }
         const channelId = this.#announceChannelId;
+        this.#publish();
         if (channelId !== null) await this.deps.say(channelId, `Tocando agora: ${label(track)}`);
         if (this.#skipRequested) {
           this.#skipRequested = false; // …or during that announce
@@ -235,6 +282,9 @@ export class GuildPlayer {
       // start while this one is hanging up.
       await connection?.leave().catch(() => undefined);
       this.#running = false;
+      // The room is gone, so the card goes with it: `voiceChannelId` is null
+      // now and index.ts reads that as "take it down".
+      this.#publish();
 
       if (!stopping && this.#announceChannelId !== null) await this.deps.say(this.#announceChannelId, 'A fila acabou. Saí da sala.');
       // A track queued during the tear-down above would be orphaned: pick it up.

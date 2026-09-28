@@ -65,6 +65,47 @@ describe('formatDuration', () => {
 });
 
 describe('GuildPlayer', () => {
+  /*
+   * A press on the widget (the card at the foot of the members column) calls
+   * these with NO channel. The bug this guards against: passing the press's
+   * own `channelId` — which is a VOICE room — made the bot try to answer in a
+   * room nobody can be told anything in, and overwrote the text channel its
+   * next announcement was due in.
+   */
+  it('a press with no channel answers where the last command came from', async () => {
+    const { player, said, deps } = make();
+    await player.play('numb', ana, 'text-1');
+    said.length = 0;
+
+    await player.skip();
+
+    expect(has(said, 'Pulei')).toBe(true);
+    // In the text channel the /play came from, and nowhere else.
+    expect(vi.mocked(deps.say).mock.calls.every((call) => call[0] === 'text-1')).toBe(true);
+  });
+
+  it('a press with no channel and no command before it says nothing at all', async () => {
+    const { player, said } = make();
+
+    await player.skip();
+    await player.stop();
+
+    // There is no text channel to answer in, and the person pressing is
+    // already looking at the card: silence is the honest answer.
+    expect(said).toEqual([]);
+  });
+
+  it('a press does not steal the announcement channel from the next /play', async () => {
+    const { player, deps } = make();
+    await player.play('numb', ana, 'text-1');
+    await player.skip();
+    vi.mocked(deps.say).mockClear();
+
+    await player.play('outra', ana, 'text-2');
+
+    expect(vi.mocked(deps.say).mock.calls.every((call) => call[0] === 'text-2')).toBe(true);
+  });
+
   it('joins, announces, plays, and leaves when the queue empties', async () => {
     const { player, connection, said, deps } = make();
     await player.play('song a', ana, 'tc1');
