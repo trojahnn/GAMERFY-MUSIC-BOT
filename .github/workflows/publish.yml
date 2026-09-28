@@ -1,6 +1,7 @@
 # Constrói a imagem linux/amd64 e publica no GitHub Container Registry (GHCR) a
 # cada push no main. Usa o GITHUB_TOKEN automático — nenhum segredo a configurar.
-# A imagem fica em ghcr.io/<dono>/gamerfy-music-bot:latest, pronta para o Bunny.
+# A imagem fica em ghcr.io/<dono>/<repo em minúsculas>:latest, pronta para o
+# Bunny, e também em :sha-<commit> para saber qual build é qual.
 name: Publish image
 on:
   push:
@@ -20,9 +21,26 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # `github.repository` traz o nome como o GitHub o escreve, e este
+      # repositório foi renomeado para GAMERFY-MUSIC-BOT em algum momento. Um
+      # nome de registro tem de ser minúsculo, então TODO push desde esse
+      # rename morreu aqui com "repository name must be lowercase" — o CI
+      # seguiu verde e a imagem simplesmente parou de ser construída, que é a
+      # pior forma que uma quebra pode ter. Minusculizado aqui, uma vez, em vez
+      # de fixar o nome na mão.
+      - name: O nome da imagem, em minúsculas
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ github.repository }}:latest
+          # Duas tags, de propósito. `:latest` é o que o app do Bunny puxa, e
+          # `:sha-<commit>` é como qualquer um descobre QUAL build é esse —
+          # sem ela nem o GHCR nem o painel do Bunny sabem dizer se o container
+          # adotou a imagem nova, e o único jeito de descobrir era cutucar o
+          # bot para ver se ele se comportava diferente.
+          tags: |
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
