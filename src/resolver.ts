@@ -52,7 +52,8 @@ export function parseDuration(raw: string | undefined): number | null {
   return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : null;
 }
 
-function destroyStream(stream: NodeJS.ReadableStream): void {
+/** Closes a stream and, with it, the processes behind it. Exported for the player's opened-ahead track. */
+export function destroyStream(stream: NodeJS.ReadableStream): void {
   const maybe = stream as NodeJS.ReadableStream & { destroy?: (error?: Error) => void };
   if (typeof maybe.destroy === 'function') maybe.destroy();
 }

@@ -1,6 +1,6 @@
 // The per-guild player: a queue, the track in flight, and the voice connection.
 // One `#run` loop per guild advances the queue and hangs up when it empties.
-import type { Resolver, Track } from './resolver.js';
+import { destroyStream, type Resolver, type Track } from './resolver.js';
 
 /** The slice of the SDK's `VoiceConnection` this needs — a test doubles it. */
 export interface Connection {
@@ -102,6 +102,21 @@ export class GuildPlayer {
   #lastVoiceChannelId: string | null = null;
   /** Where announcements go — the last channel a command came from. */
   #announceChannelId: string | null = null;
+  /**
+   * A track's audio opened before it was needed, with the track it belongs to.
+   *
+   * It exists for the first `/play` of a session. Joining a voice room and
+   * opening a track's audio each take seconds, neither depends on the other,
+   * and until now they ran one after the other — so the listener waited for
+   * the sum. Opened here, the audio is already on its way while the bot is
+   * still shaking hands with the room, and what they wait for is the longer of
+   * the two.
+   *
+   * Only ever the track at the head of the queue, and dropped if the queue
+   * moved on: holding an open ffmpeg for a track further down would keep a
+   * connection alive for minutes to save seconds.
+   */
+  #opened: { track: Track; stream: NodeJS.ReadableStream } | null = null;
 
   constructor(
     private readonly guildId: string,
@@ -272,6 +287,36 @@ export class GuildPlayer {
     return this.deps.say(channelId, `Tocando agora: ${label(this.#current)} — pedido por ${this.#current.requestedBy}`);
   }
 
+  /** Opens a track's audio ahead of time, if there is one and none is open. */
+  #openAhead(track: Track | undefined): void {
+    if (track === undefined || this.#opened !== null) return;
+    try {
+      this.#opened = { track, stream: this.deps.resolver.open(track) };
+    } catch {
+      // Swallowed on purpose: this is an optimisation, and the real `open` at
+      // play time is where a failure gets to say why the track was skipped.
+      this.#opened = null;
+    }
+  }
+
+  /** The audio for a track: the one opened ahead if it is the same track, else a fresh one. */
+  #audioFor(track: Track): NodeJS.ReadableStream {
+    const ready = this.#opened;
+    this.#opened = null;
+    if (ready !== null && ready.track === track) return ready.stream;
+    // The queue moved while we were joining (a skip, a clear): whatever was
+    // opened is for a track nobody is playing, and it holds an ffmpeg.
+    if (ready !== null) destroyStream(ready.stream);
+    return this.deps.resolver.open(track);
+  }
+
+  /** Closes an opened-ahead stream nobody will play — a join that failed, a stop. */
+  #dropOpened(): void {
+    const ready = this.#opened;
+    this.#opened = null;
+    if (ready !== null) destroyStream(ready.stream);
+  }
+
   async #run(voiceChannelId: string): Promise<void> {
     if (this.#running) return; // never two loops (never two joins) for one guild
     this.#running = true;
@@ -279,11 +324,17 @@ export class GuildPlayer {
     this.#skipRequested = false;
     this.#lastVoiceChannelId = voiceChannelId;
 
+    // Started BEFORE the join and not awaited: `open` hands back a stream whose
+    // processes are already running, so the audio is fetched while the room is
+    // being joined instead of after it.
+    this.#openAhead(this.#queue[0]);
+
     try {
       this.#connection = await this.deps.join(voiceChannelId);
     } catch (error) {
       this.#running = false;
       this.#queue.length = 0;
+      this.#dropOpened();
       if (this.#announceChannelId !== null) await this.deps.say(this.#announceChannelId, `Não consegui entrar na sala: ${reason(error)}`);
       return;
     }
@@ -307,7 +358,7 @@ export class GuildPlayer {
         }
 
         try {
-          await this.#connection.play(this.deps.resolver.open(track));
+          await this.#connection.play(this.#audioFor(track));
         } catch (error) {
           if (isMissingPermission(error)) {
             this.#stopping = true;
@@ -324,6 +375,7 @@ export class GuildPlayer {
       const stopping = this.#stopping;
       this.#connection = null;
       this.#current = null;
+      this.#dropOpened();
       // #running stays true across leave(), so no second #run (double join) can
       // start while this one is hanging up.
       await connection?.leave().catch(() => undefined);

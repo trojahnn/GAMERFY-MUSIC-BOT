@@ -338,3 +338,82 @@ describe('GuildPlayer', () => {
     expect(has(said, 'A fila está cheia')).toBe(true);
   });
 });
+
+/*
+ * Opening the audio while the room is being joined (owner, 29/09: "ela demora
+ * muito a ser executada").
+ *
+ * Joining a voice room and opening a track's audio each take seconds and
+ * neither depends on the other, but they used to run one after the other, so
+ * the listener waited for the sum. What is proved here is the overlap, and
+ * that nothing is left running when the overlap turns out to be wasted.
+ */
+describe('the audio opens while the bot is still joining', () => {
+  it('opens the first track before the join has finished', async () => {
+    const order: string[] = [];
+    const connection = new FakeConnection();
+    const opened = vi.fn(() => {
+      order.push('open');
+      return {} as unknown as NodeJS.ReadableStream;
+    });
+    const resolver: Resolver = {
+      resolve: vi.fn(async (query: string, requestedBy: string) => ({ title: query, durationSec: 100, url: `https://x/${query}`, requestedBy })),
+      open: opened,
+    };
+    // In a holder and not a bare `let`: TypeScript narrows a variable only
+    // assigned inside a callback to `never`, and the call below stops compiling.
+    const gate: { finish: (() => void) | null } = { finish: null };
+    const deps: PlayerDeps = {
+      resolver,
+      maxQueue: 3,
+      join: vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          gate.finish = resolve;
+        });
+        order.push('joined');
+        return connection;
+      }),
+      voiceChannelOf: vi.fn(async () => 'vc1'),
+      roomNameOf: vi.fn(() => null),
+      say: vi.fn(async () => undefined),
+    };
+    const player = new GuildPlayer('g1', deps);
+
+    void player.play('numb', { id: '1', username: 'ana' }, 'c1');
+    await vi.waitFor(() => expect(opened).toHaveBeenCalled());
+    // The audio was opened while the join was still in the air — that is the
+    // whole point. Before this, `open` came strictly after `joined`.
+    expect(order).toEqual(['open']);
+
+    gate.finish?.();
+    await vi.waitFor(() => expect(connection.playCalls).toBe(1));
+    // And it was used, not opened twice.
+    expect(opened).toHaveBeenCalledTimes(1);
+    connection.endCurrent();
+  });
+
+  it('closes the audio it opened when the join fails, instead of leaving it running', async () => {
+    const destroy = vi.fn();
+    const stream = { destroy } as unknown as NodeJS.ReadableStream;
+    const resolver: Resolver = {
+      resolve: vi.fn(async (query: string, requestedBy: string) => ({ title: query, durationSec: 100, url: `https://x/${query}`, requestedBy })),
+      open: vi.fn(() => stream),
+    };
+    const said: string[] = [];
+    const deps: PlayerDeps = {
+      resolver,
+      maxQueue: 3,
+      join: vi.fn(() => Promise.reject(new Error('sala cheia'))),
+      voiceChannelOf: vi.fn(async () => 'vc1'),
+      roomNameOf: vi.fn(() => null),
+      say: vi.fn(async (_channelId: string, text: string) => {
+        said.push(text);
+      }),
+    };
+
+    await new GuildPlayer('g1', deps).play('numb', { id: '1', username: 'ana' }, 'c1');
+    await vi.waitFor(() => expect(said.some((line) => line.includes('Não consegui entrar'))).toBe(true));
+    // An ffmpeg nobody will ever read from is an ffmpeg that runs for ever.
+    expect(destroy).toHaveBeenCalled();
+  });
+});
