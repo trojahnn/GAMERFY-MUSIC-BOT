@@ -1,12 +1,13 @@
 // Wires the Gamerfy bot to the music player: read a `/play …` line, resolve it
 // with yt-dlp, join the asker's room and play; `/skip`, `/stop`, `/queue`, `/np`.
 // Also serves a landing page (and /health) so people can add the bot.
-import { Bot, WIDGET_MAX_QUEUE, type WidgetTrack } from '@gamerfy/bot';
+import { Bot } from '@gamerfy/bot';
 import { parseCommand } from './commands.js';
 import { loadConfig } from './config.js';
-import { formatDuration, GuildPlayer, type PlayerSnapshot } from './player.js';
+import { GuildPlayer, type PlayerSnapshot } from './player.js';
 import { Players } from './players.js';
-import { FileResolver, YtDlpResolver, type Resolver, type Track } from './resolver.js';
+import { FileResolver, YtDlpResolver, type Resolver } from './resolver.js';
+import { applyAction, cardOf } from './widget.js';
 import { connectWithRetry } from './startup.js';
 import { createWebServer } from './web.js';
 
@@ -59,53 +60,25 @@ const players = new Players(
 );
 
 /**
- * The card at the foot of the members column (SDK `setWidget`).
- *
- * `pause` is NOT offered, because this bot cannot pause: the voice connection
- * plays a stream to its end or stops. Offering the button would draw a control
- * that does nothing — the backend refuses a press for an action the card never
- * published, so the honest card is the one without it.
+ * The card at the foot of the members column (SDK `setWidget`). What it draws
+ * and what a press does both live in `widget.ts`, over one list of actions, so
+ * the two halves cannot drift apart again.
  *
  * Failures are logged once and swallowed. The widget is decoration over the
  * music: a backend that refuses it must not end a song, and the next change
  * publishes again anyway.
  */
 function publishWidget(guildId: string, snapshot: PlayerSnapshot): void {
-  const trackOf = (track: Track): WidgetTrack => ({
-    title: track.title,
-    subtitle: track.durationSec === null ? null : formatDuration(track.durationSec),
-    requestedBy: track.requestedBy,
-  });
-
-  // Nothing playing and no room: the bot has left, and the card goes with it.
-  if (snapshot.current === null && snapshot.queue.length === 0) {
+  const card = cardOf(snapshot);
+  if (card === null) {
     bot.clearWidget(guildId).catch((error: unknown) => {
       console.error('[music] não consegui tirar o widget', error);
     });
     return;
   }
-
-  bot
-    .setWidget(guildId, {
-      kind: 'player',
-      track: snapshot.current === null ? null : trackOf(snapshot.current),
-      // `playing` is what the card draws the button from: paused shows play.
-      playing: snapshot.current !== null && !snapshot.paused,
-      // Left out on purpose: the position in the track is not tracked, and a
-      // bar that always sat at zero would be worse than no bar. The ring in
-      // the app simply stays empty.
-      progress: null,
-      queue: snapshot.queue.slice(0, WIDGET_MAX_QUEUE).map(trackOf),
-      queueTotal: snapshot.queue.length,
-      // Pause and resume are real now (SDK 0.4): the pacer parks between two
-      // frames with the source open, so coming back carries on from the same
-      // packet instead of restarting the track.
-      actions: ['pause', 'resume', 'skip', 'stop'],
-      voiceChannelId: snapshot.voiceChannelId,
-    })
-    .catch((error: unknown) => {
-      console.error('[music] não consegui publicar o widget', error);
-    });
+  bot.setWidget(guildId, card).catch((error: unknown) => {
+    console.error('[music] não consegui publicar o widget', error);
+  });
 }
 
 /*
@@ -114,10 +87,7 @@ function publishWidget(guildId: string, snapshot: PlayerSnapshot): void {
  * this is the same command the person could have typed, arriving as a button.
  */
 bot.on('widgetAction', (event) => {
-  const player = players.of(event.guildId);
-  // No channel: `event.channelId` is the VOICE room, not a place to answer in.
-  if (event.action === 'skip') void player.skip();
-  if (event.action === 'stop') void player.stop();
+  applyAction(players.of(event.guildId), event.action);
 });
 
 bot.on('message', async (message) => {
