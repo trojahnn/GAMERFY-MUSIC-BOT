@@ -10,6 +10,8 @@ export interface Connection {
   pause(): boolean;
   resume(): boolean;
   readonly paused: boolean;
+  /** How much of the track has actually been sent, in ms — the card's counter. */
+  readonly elapsedMs: number;
   leave(): Promise<void>;
 }
 
@@ -77,6 +79,15 @@ export interface PlayerSnapshot {
   voiceChannelId: string | null;
   /** Held where it is — the card draws play instead of pause. */
   paused: boolean;
+  /**
+   * Where the audio is, in milliseconds, and how long the track lasts.
+   *
+   * Taken from the connection's own count of what it has SENT, not from a
+   * stopwatch: a track whose source stalled, or that spent a minute paused, is
+   * where the room heard it, not where a clock says it should be.
+   */
+  elapsedMs: number | null;
+  durationMs: number | null;
 }
 
 export class GuildPlayer {
@@ -115,6 +126,8 @@ export class GuildPlayer {
       queue: [...this.#queue],
       voiceChannelId: this.#connection === null ? null : this.#lastVoiceChannelId,
       paused: this.#connection?.paused ?? false,
+      elapsedMs: this.#connection === null || this.#current === null ? null : this.#connection.elapsedMs,
+      durationMs: this.#current?.durationSec == null ? null : Math.round(this.#current.durationSec * 1000),
     });
   }
 

@@ -24,7 +24,7 @@ function player(): PressablePlayer & { calls: string[] } {
 const track = (title: string) => ({ title, url: `https://exemplo.com/${title}`, durationSec: 215, requestedBy: 'ana' });
 
 function snapshot(over: Partial<PlayerSnapshot> = {}): PlayerSnapshot {
-  return { current: track('Uma música'), queue: [], paused: false, voiceChannelId: '500', ...over } as PlayerSnapshot;
+  return { current: track('Uma música'), queue: [], paused: false, voiceChannelId: '500', elapsedMs: 90_000, durationMs: 215_000, ...over } as PlayerSnapshot;
 }
 
 describe('every button the card offers', () => {
@@ -80,5 +80,34 @@ describe('a press', () => {
     const pause = vi.fn(() => Promise.resolve());
     applyAction({ pause, resume: pause, skip: pause, stop: pause }, 'pause');
     expect(pause).toHaveBeenCalledWith();
+  });
+});
+
+describe('the counter on the card', () => {
+  it('carries the position and the length, so the app can run the clock itself', () => {
+    // Published once per change, never once a second: the app counts from here
+    // for as long as `playing` holds. A bot ticking this every second would be
+    // polling with extra steps.
+    const card = cardOf(snapshot({ elapsedMs: 90_000, durationMs: 215_000 }));
+    expect(card?.elapsedMs).toBe(90_000);
+    expect(card?.durationMs).toBe(215_000);
+    expect(card?.progress).toBeCloseTo(90 / 215, 5);
+  });
+
+  it('says nothing about a track with no known length, instead of a ring stuck at zero', () => {
+    const card = cardOf(snapshot({ elapsedMs: 30_000, durationMs: null }));
+    expect(card?.progress).toBeNull();
+    // The elapsed time is still true, and a live stream is exactly where a
+    // counter with no total is the only honest thing to show.
+    expect(card?.elapsedMs).toBe(30_000);
+  });
+
+  it('never reports more than the whole track, however long the source ran over', () => {
+    const card = cardOf(snapshot({ elapsedMs: 230_000, durationMs: 215_000 }));
+    expect(card?.progress).toBe(1);
+  });
+
+  it('does not divide by a length of zero', () => {
+    expect(cardOf(snapshot({ elapsedMs: 1_000, durationMs: 0 }))?.progress).toBeNull();
   });
 });

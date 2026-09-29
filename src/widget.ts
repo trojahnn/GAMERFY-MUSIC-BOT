@@ -46,7 +46,15 @@ export function cardOf(snapshot: PlayerSnapshot): PlayerWidget | null {
     track: snapshot.current === null ? null : trackOf(snapshot.current),
     // What the card draws the button from: paused shows play, playing shows pause.
     playing: snapshot.current !== null && !snapshot.paused,
-    progress: null,
+    // The fraction AND the two milliseconds: the ring is drawn from one and
+    // the "1:30 / 3:34" from the other, and a bot that published only the
+    // fraction would make the app guess the numbers back out of it.
+    progress:
+      snapshot.elapsedMs === null || snapshot.durationMs === null || snapshot.durationMs === 0
+        ? null
+        : Math.min(1, snapshot.elapsedMs / snapshot.durationMs),
+    elapsedMs: snapshot.elapsedMs,
+    durationMs: snapshot.durationMs,
     queue: snapshot.queue.slice(0, WIDGET_MAX_QUEUE).map(trackOf),
     queueTotal: snapshot.queue.length,
     actions: [...OFFERED_ACTIONS],

@@ -17,6 +17,8 @@ class FakeConnection implements Connection {
   }
   /** The pause, as the real connection reports it: held or not, never a restart. */
   paused = false;
+  /** The real one counts frames written; a test just says where the audio is. */
+  elapsedMs = 0;
   pause(): boolean {
     if (this.playCalls === 0 || this.paused) return false;
     this.paused = true;
